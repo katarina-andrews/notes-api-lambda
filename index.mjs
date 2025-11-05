@@ -13,53 +13,105 @@ const client = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(client);
 
 export const handler = async (event) => {
-  console.log("HANDLER EVENT!!: ", event);
-  
-
+  console.log("HANDLER EVENT!!: ", JSON.stringify(event));
   const { rawPath, body } = event;
-
   const httpMethod = event.requestContext.http.method;
 
-  if (httpMethod === "GET" && rawPath === "/notes") {
-    const result = await docClient.send(
-      new ScanCommand({ TableName: "Notes" })
-    );
+  const errorResponse = (error) => {
+    return {
+      statusCode: 500,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message: "There was an error",
+        error: error.message,
+      }),
+    };
+  };
 
-    return { statusCode: 200, body: JSON.stringify(result.Items) };
+  if (httpMethod === "GET" && rawPath === "/notes") {
+    try {
+      const result = await docClient.send(
+        new ScanCommand({ TableName: "Notes" })
+      );
+
+      return {
+        statusCode: 200,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(result),
+      };
+    } catch (error) {
+      console.error("Error occurred:", error);
+      return errorResponse(error);
+    }
   }
 
   if (httpMethod === "POST" && rawPath === "/notes") {
-    const note = JSON.parse(body);
+    try {
+      const note = JSON.parse(body);
+      await docClient.send(new PutCommand({ TableName: "Notes", Item: note }));
 
-    await docClient.send(new PutCommand({ TableName: "Notes", Item: note }));
-
-    return { statusCode: 201, body: JSON.stringify(note) };
+      return {
+        statusCode: 201,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(note),
+      };
+    } catch (error) {
+      console.error("Error occurred:", error);
+      return errorResponse(error);
+    }
   }
 
   if (httpMethod === "GET" && rawPath.match(/^\/notes\/\w+/)) {
-    const id = rawPath.split("/")[2];
+    try {
+      const id = rawPath.split("/")[2];
 
-    const result = await docClient.send(
-      new GetCommand({ TableName: "Notes", Key: { id } })
-    );
+      const result = await docClient.send(
+        new GetCommand({ TableName: "Notes", Key: { id } })
+      );
 
-    return result.Item
-      ? { statusCode: 200, body: JSON.stringify(result.Item) }
-      : { statusCode: 404, body: JSON.stringify({ error: "Note not found" }) };
+      if (result.Item) {
+        return {
+          statusCode: 200,
+          body: JSON.stringify(result.Item),
+        };
+      }
+
+      return {
+        statusCode: 404,
+        body: JSON.stringify({ error: "Note not found" }),
+      };
+    } catch (error) {
+      console.error("Error occurred:", error);
+      return errorResponse(error);
+    }
   }
 
   if (httpMethod === "DELETE" && rawPath.match(/^\/notes\/\w+/)) {
-    const id = rawPath.split("/")[2];
+    try {
+      const id = rawPath.split("/")[2];
 
-    await docClient.send(
-      new DeleteCommand({ TableName: "Notes", Key: { id } })
-    );
+      const result = await docClient.send(
+        new DeleteCommand({
+          TableName: "Notes",
+          Key: { id },
+          ReturnValues: "ALL_OLD",
+        })
+      );
 
-    return {
-      statusCode: 200,
-
-      body: JSON.stringify({ message: "Note deleted" }),
-    };
+      if (!result.Attributes) {
+        return {
+          statusCode: 404,
+          body: JSON.stringify({ error: "Note not found" }),
+        };
+      }
+      return {
+        statusCode: 200,
+        body: JSON.stringify({ message: "Note deleted" }),
+      };
+    } catch (error) {
+      console.error("Error occurred:", error);
+      return errorResponse(error);
+    }
   }
 
   return {
