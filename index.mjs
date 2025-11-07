@@ -1,122 +1,99 @@
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
-
 import {
   DynamoDBDocumentClient,
   PutCommand,
   GetCommand,
-  ScanCommand,
+  QueryCommand,
   DeleteCommand,
 } from "@aws-sdk/lib-dynamodb";
 
 const client = new DynamoDBClient({});
-
 const docClient = DynamoDBDocumentClient.from(client);
 
+const TABLE = process.env.NOTES_TABLE || "Notes";
+
 export const handler = async (event) => {
-  console.log("HANDLER EVENT!!: ", JSON.stringify(event));
-  const { rawPath, body } = event;
-  const httpMethod = event.requestContext.http.method;
+  console.log("HANDLER EVENT:", JSON.stringify(event));
 
-  const errorResponse = (error) => {
-    return {
-      statusCode: 500,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        message: "There was an error",
-        error: error.message,
-      }),
-    };
-  };
+  const { rawPath, queryStringParameters } = event;
+  const httpMethod = event.requestContext?.http?.method;
+  const qp = queryStringParameters || {};
 
+  // GET /notes?userId=SUB  → Query by userId
   if (httpMethod === "GET" && rawPath === "/notes") {
-    try {
-      const result = await docClient.send(
-        new ScanCommand({ TableName: "Notes" })
-      );
-
-      return {
-        statusCode: 200,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(result),
-      };
-    } catch (error) {
-      console.error("Error occurred:", error);
-      return errorResponse(error);
+    const userId = qp.userId;
+    if (!userId) {
+      return { statusCode: 400, body: JSON.stringify({ error: "userId query param is required" }) };
     }
+
+    const result = await docClient.send(
+      new QueryCommand({
+        TableName: TABLE,
+        KeyConditionExpression: "userId = :uid",
+        ExpressionAttributeValues: { ":uid": userId },
+        ScanIndexForward: false,
+      })
+    );
+
+    return { statusCode: 200, body: JSON.stringify(result.Items || []) };
   }
 
+  // POST /notes  (body: { text, userId })
   if (httpMethod === "POST" && rawPath === "/notes") {
-    try {
-      const note = JSON.parse(body);
-      await docClient.send(new PutCommand({ TableName: "Notes", Item: note }));
+    const body = JSON.parse(event.body || "{}");
+    const { text, userId } = body;
 
-      return {
-        statusCode: 201,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(note),
-      };
-    } catch (error) {
-      console.error("Error occurred:", error);
-      return errorResponse(error);
+    if (!text || !userId) {
+      return { statusCode: 400, body: JSON.stringify({ error: "text and userId are required" }) };
     }
+
+    const id =
+      (globalThis.crypto && globalThis.crypto.randomUUID?.()) ||
+      (typeof crypto !== "undefined" && crypto.randomUUID?.()) ||
+      String(Date.now());
+
+    const item = {
+      userId,  // PK
+      id,      // SK
+      text,
+      createdAt: Date.now(),
+    };
+
+    await docClient.send(new PutCommand({ TableName: TABLE, Item: item }));
+    return { statusCode: 201, body: JSON.stringify(item) };
   }
 
-  if (httpMethod === "GET" && rawPath.match(/^\/notes\/\w+/)) {
-    try {
-      const id = rawPath.split("/")[2];
-
-      const result = await docClient.send(
-        new GetCommand({ TableName: "Notes", Key: { id } })
-      );
-
-      if (result.Item) {
-        return {
-          statusCode: 200,
-          body: JSON.stringify(result.Item),
-        };
-      }
-
-      return {
-        statusCode: 404,
-        body: JSON.stringify({ error: "Note not found" }),
-      };
-    } catch (error) {
-      console.error("Error occurred:", error);
-      return errorResponse(error);
+  // GET /notes/:id  (requires ?userId=SUB)
+  if (httpMethod === "GET" && /^\/notes\/\w+/.test(rawPath)) {
+    const id = rawPath.split("/")[2];
+    const userId = qp.userId;
+    if (!userId) {
+      return { statusCode: 400, body: JSON.stringify({ error: "userId query param is required" }) };
     }
+
+    const result = await docClient.send(
+      new GetCommand({ TableName: TABLE, Key: { userId, id } })
+    );
+
+    return result.Item
+      ? { statusCode: 200, body: JSON.stringify(result.Item) }
+      : { statusCode: 404, body: JSON.stringify({ error: "Note not found" }) };
   }
 
-  if (httpMethod === "DELETE" && rawPath.match(/^\/notes\/\w+/)) {
-    try {
-      const id = rawPath.split("/")[2];
-
-      const result = await docClient.send(
-        new DeleteCommand({
-          TableName: "Notes",
-          Key: { id },
-          ReturnValues: "ALL_OLD",
-        })
-      );
-
-      if (!result.Attributes) {
-        return {
-          statusCode: 404,
-          body: JSON.stringify({ error: "Note not found" }),
-        };
-      }
-      return {
-        statusCode: 200,
-        body: JSON.stringify({ message: "Note deleted" }),
-      };
-    } catch (error) {
-      console.error("Error occurred:", error);
-      return errorResponse(error);
+  // DELETE /notes/:id  (requires ?userId=SUB)
+  if (httpMethod === "DELETE" && /^\/notes\/\w+/.test(rawPath)) {
+    const id = rawPath.split("/")[2];
+    const userId = qp.userId;
+    if (!userId) {
+      return { statusCode: 400, body: JSON.stringify({ error: "userId query param is required" }) };
     }
+
+    await docClient.send(
+      new DeleteCommand({ TableName: TABLE, Key: { userId, id } })
+    );
+
+    return { statusCode: 200, body: JSON.stringify({ message: "Note deleted" }) };
   }
 
-  return {
-    statusCode: 400,
-
-    body: JSON.stringify({ error: "Unsupported route" }),
-  };
+  return { statusCode: 400, body: JSON.stringify({ error: "Unsupported route" }) };
 };
